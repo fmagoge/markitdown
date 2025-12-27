@@ -54,23 +54,32 @@ class CsvConverter(DocumentConverter):
         if not rows:
             return DocumentConverterResult(markdown="")
 
-        # Create markdown table
+        # Pre-compute header column count once (O(1) per row instead of O(n))
+        header = rows[0]
+        num_cols = len(header)
+
+        # Create markdown table with pre-allocated list capacity hint
         markdown_table = []
 
         # Add header row
-        markdown_table.append("| " + " | ".join(rows[0]) + " |")
+        markdown_table.append("| " + " | ".join(header) + " |")
 
-        # Add separator row
-        markdown_table.append("| " + " | ".join(["---"] * len(rows[0])) + " |")
+        # Add separator row (pre-compute separator string)
+        separator = "| " + " | ".join(["---"] * num_cols) + " |"
+        markdown_table.append(separator)
 
-        # Add data rows
+        # Add data rows - optimized to avoid repeated len() calls and in-place mutations
         for row in rows[1:]:
-            # Make sure row has the same number of columns as header
-            while len(row) < len(rows[0]):
-                row.append("")
-            # Truncate if row has more columns than header
-            row = row[: len(rows[0])]
-            markdown_table.append("| " + " | ".join(row) + " |")
+            row_len = len(row)
+            if row_len < num_cols:
+                # Pad with empty strings - single operation instead of while loop
+                normalized_row = row + [""] * (num_cols - row_len)
+            elif row_len > num_cols:
+                # Truncate
+                normalized_row = row[:num_cols]
+            else:
+                normalized_row = row
+            markdown_table.append("| " + " | ".join(normalized_row) + " |")
 
         result = "\n".join(markdown_table)
 

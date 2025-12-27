@@ -14,6 +14,11 @@ from .._base_converter import DocumentConverter, DocumentConverterResult
 from .._stream_info import StreamInfo
 from .._exceptions import MissingDependencyException, MISSING_DEPENDENCY_MESSAGE
 
+# Pre-compiled regex patterns for efficiency
+_ALT_TEXT_CLEANUP_PATTERN = re.compile(r"[\r\n\[\]]")
+_WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
+_FILENAME_CLEANUP_PATTERN = re.compile(r"\W")
+
 # Try loading optional (but in this case, required) dependencies
 # Save reporting of any exceptions for later
 _dependency_exc_info = None
@@ -135,10 +140,10 @@ class PptxConverter(DocumentConverter):
                         # Unable to get alt text
                         pass
 
-                    # Prepare the alt, escaping any special characters
+                    # Prepare the alt, escaping any special characters using pre-compiled patterns
                     alt_text = "\n".join([llm_description, alt_text]) or shape.name
-                    alt_text = re.sub(r"[\r\n\[\]]", " ", alt_text)
-                    alt_text = re.sub(r"\s+", " ", alt_text).strip()
+                    alt_text = _ALT_TEXT_CLEANUP_PATTERN.sub(" ", alt_text)
+                    alt_text = _WHITESPACE_COLLAPSE_PATTERN.sub(" ", alt_text).strip()
 
                     # If keep_data_uris is True, use base64 encoding for images
                     if kwargs.get("keep_data_uris", False):
@@ -147,8 +152,8 @@ class PptxConverter(DocumentConverter):
                         b64_string = base64.b64encode(blob).decode("utf-8")
                         md_content += f"\n![{alt_text}](data:{content_type};base64,{b64_string})\n"
                     else:
-                        # A placeholder name
-                        filename = re.sub(r"\W", "", shape.name) + ".jpg"
+                        # A placeholder name using pre-compiled pattern
+                        filename = _FILENAME_CLEANUP_PATTERN.sub("", shape.name) + ".jpg"
                         md_content += "\n![" + alt_text + "](" + filename + ")\n"
 
                 # Tables

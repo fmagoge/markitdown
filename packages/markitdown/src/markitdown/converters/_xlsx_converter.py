@@ -1,6 +1,5 @@
 import sys
-from typing import BinaryIO, Any
-from ._html_converter import HtmlConverter
+from typing import BinaryIO, Any, List
 from .._base_converter import DocumentConverter, DocumentConverterResult
 from .._exceptions import MissingDependencyException, MISSING_DEPENDENCY_MESSAGE
 from .._stream_info import StreamInfo
@@ -33,6 +32,43 @@ ACCEPTED_XLS_MIME_TYPE_PREFIXES = [
 ACCEPTED_XLS_FILE_EXTENSIONS = [".xls"]
 
 
+def _dataframe_to_markdown(df) -> str:
+    """
+    Convert a pandas DataFrame directly to a Markdown table.
+    This avoids the overhead of HTML intermediate conversion.
+    """
+    if df.empty:
+        return ""
+
+    # Get column headers
+    headers = list(df.columns)
+    num_cols = len(headers)
+
+    # Build the markdown table
+    lines: List[str] = []
+
+    # Header row - escape pipe characters in header values
+    header_values = [str(h).replace("|", "\\|") for h in headers]
+    lines.append("| " + " | ".join(header_values) + " |")
+
+    # Separator row
+    lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+
+    # Data rows - escape pipe characters and handle NaN values
+    for _, row in df.iterrows():
+        row_values = []
+        for val in row:
+            # Handle NaN/None values
+            if pd.isna(val):
+                row_values.append("")
+            else:
+                # Convert to string and escape pipe characters
+                row_values.append(str(val).replace("|", "\\|"))
+        lines.append("| " + " | ".join(row_values) + " |")
+
+    return "\n".join(lines)
+
+
 class XlsxConverter(DocumentConverter):
     """
     Converts XLSX files to Markdown, with each sheet presented as a separate Markdown table.
@@ -40,7 +76,6 @@ class XlsxConverter(DocumentConverter):
 
     def __init__(self):
         super().__init__()
-        self._html_converter = HtmlConverter()
 
     def accepts(
         self,
@@ -84,13 +119,8 @@ class XlsxConverter(DocumentConverter):
         md_content = ""
         for s in sheets:
             md_content += f"## {s}\n"
-            html_content = sheets[s].to_html(index=False)
-            md_content += (
-                self._html_converter.convert_string(
-                    html_content, **kwargs
-                ).markdown.strip()
-                + "\n\n"
-            )
+            # Direct DataFrame to Markdown conversion - avoids HTML intermediate
+            md_content += _dataframe_to_markdown(sheets[s]) + "\n\n"
 
         return DocumentConverterResult(markdown=md_content.strip())
 
@@ -102,7 +132,6 @@ class XlsConverter(DocumentConverter):
 
     def __init__(self):
         super().__init__()
-        self._html_converter = HtmlConverter()
 
     def accepts(
         self,
@@ -146,12 +175,7 @@ class XlsConverter(DocumentConverter):
         md_content = ""
         for s in sheets:
             md_content += f"## {s}\n"
-            html_content = sheets[s].to_html(index=False)
-            md_content += (
-                self._html_converter.convert_string(
-                    html_content, **kwargs
-                ).markdown.strip()
-                + "\n\n"
-            )
+            # Direct DataFrame to Markdown conversion - avoids HTML intermediate
+            md_content += _dataframe_to_markdown(sheets[s]) + "\n\n"
 
         return DocumentConverterResult(markdown=md_content.strip())

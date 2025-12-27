@@ -5,6 +5,7 @@ import sys
 import shutil
 import traceback
 import io
+import tempfile
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, List, Dict, Optional, Union, BinaryIO
@@ -15,6 +16,16 @@ import requests
 import magika
 import charset_normalizer
 import codecs
+
+# Pre-compiled regex patterns for efficiency
+_NEWLINE_SPLIT_PATTERN = re.compile(r"\r?\n")
+_EXCESSIVE_NEWLINES_PATTERN = re.compile(r"\n{3,}")
+
+# Spooled temporary file threshold (1MB) - content larger than this spills to disk
+_SPOOLED_MAX_SIZE = 1024 * 1024
+
+# HTTP response chunk size for efficient network I/O
+_HTTP_CHUNK_SIZE = 262144  # 256KB
 
 from ._stream_info import StreamInfo
 from ._uri_utils import parse_data_uri, file_uri_to_path
@@ -121,6 +132,8 @@ class MarkItDown:
 
         # Register the converters
         self._converters: List[ConverterRegistration] = []
+        # Cache for sorted converters - invalidated on registration
+        self._sorted_converters_cache: Optional[List[ConverterRegistration]] = None
 
         if (
             enable_builtins is None or enable_builtins
@@ -359,11 +372,12 @@ class MarkItDown:
                 assert base_guess is not None  # for mypy
                 base_guess = base_guess.copy_and_update(url=url)
 
-        # Check if we have a seekable stream. If not, load the entire stream into memory.
+        # Check if we have a seekable stream. If not, buffer to a SpooledTemporaryFile
+        # which uses memory up to _SPOOLED_MAX_SIZE, then spills to disk for large files
         if not stream.seekable():
-            buffer = io.BytesIO()
+            buffer = tempfile.SpooledTemporaryFile(max_size=_SPOOLED_MAX_SIZE, mode="w+b")
             while True:
-                chunk = stream.read(4096)
+                chunk = stream.read(65536)  # 64KB chunks for efficiency
                 if not chunk:
                     break
                 buffer.write(chunk)
@@ -516,9 +530,9 @@ class MarkItDown:
             # Deprecated -- use stream_info
             base_guess = base_guess.copy_and_update(url=url)
 
-        # Read into BytesIO
+        # Read into BytesIO with larger chunk size for network efficiency
         buffer = io.BytesIO()
-        for chunk in response.iter_content(chunk_size=512):
+        for chunk in response.iter_content(chunk_size=_HTTP_CHUNK_SIZE):
             buffer.write(chunk)
         buffer.seek(0)
 
@@ -536,10 +550,13 @@ class MarkItDown:
         # Keep track of which converters throw exceptions
         failed_attempts: List[FailedConversionAttempt] = []
 
-        # Create a copy of the page_converters list, sorted by priority.
-        # We do this with each call to _convert because the priority of converters may change between calls.
-        # The sort is guaranteed to be stable, so converters with the same priority will remain in the same order.
-        sorted_registrations = sorted(self._converters, key=lambda x: x.priority)
+        # Use cached sorted converters or create and cache them
+        # The cache is invalidated when converters are registered
+        if self._sorted_converters_cache is None:
+            self._sorted_converters_cache = sorted(
+                self._converters, key=lambda x: x.priority
+            )
+        sorted_registrations = self._sorted_converters_cache
 
         # Remember the initial stream position so that we can return to it
         cur_pos = file_stream.tell()
@@ -607,11 +624,14 @@ class MarkItDown:
                         file_stream.seek(cur_pos)
 
                 if res is not None:
-                    # Normalize the content
+                    # Normalize the content using pre-compiled patterns
                     res.text_content = "\n".join(
-                        [line.rstrip() for line in re.split(r"\r?\n", res.text_content)]
+                        line.rstrip()
+                        for line in _NEWLINE_SPLIT_PATTERN.split(res.text_content)
                     )
-                    res.text_content = re.sub(r"\n{3,}", "\n\n", res.text_content)
+                    res.text_content = _EXCESSIVE_NEWLINES_PATTERN.sub(
+                        "\n\n", res.text_content
+                    )
                     return res
 
         # If we got this far without success, report any exceptions
@@ -662,6 +682,8 @@ class MarkItDown:
         self._converters.insert(
             0, ConverterRegistration(converter=converter, priority=priority)
         )
+        # Invalidate the sorted converters cache
+        self._sorted_converters_cache = None
 
     def _get_stream_info_guesses(
         self, file_stream: BinaryIO, base_guess: StreamInfo
@@ -690,16 +712,20 @@ class MarkItDown:
 
         # Call magika to guess from the stream
         cur_pos = file_stream.tell()
+
+        # Cache the first 4KB for charset detection to avoid re-reading
+        file_stream.seek(cur_pos)
+        cached_stream_page = file_stream.read(4096)
+        file_stream.seek(cur_pos)
+
         try:
             result = self._magika.identify_stream(file_stream)
             if result.status == "ok" and result.prediction.output.label != "unknown":
-                # If it's text, also guess the charset
+                # If it's text, also guess the charset using cached bytes
                 charset = None
                 if result.prediction.output.is_text:
-                    # Read the first 4k to guess the charset
-                    file_stream.seek(cur_pos)
-                    stream_page = file_stream.read(4096)
-                    charset_result = charset_normalizer.from_bytes(stream_page).best()
+                    # Use the cached bytes instead of re-reading
+                    charset_result = charset_normalizer.from_bytes(cached_stream_page).best()
 
                     if charset_result is not None:
                         charset = self._normalize_charset(charset_result.encoding)
